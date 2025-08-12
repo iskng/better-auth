@@ -114,7 +114,7 @@ export function AuthProvider({
     };
 
     return fetchWithRetry();
-  }, [client]);
+  }, [authClient, logVerbose]);
 
   const isAuthenticated = session !== null;
 
