@@ -7,6 +7,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
 } from "react";
 import { createAuthClient } from "better-auth/react";
 import { convexClient, crossDomainClient } from "../client/plugins";
@@ -75,6 +76,9 @@ export function AuthProvider({
     [verbose]
   );
 
+  // Track the cached token
+  const cachedTokenRef = useRef<string | null>(null);
+
   const fetchToken = useCallback(async () => {
     const initialBackoff = 100;
     const maxBackoff = 1000;
@@ -112,16 +116,30 @@ export function AuthProvider({
     return fetchWithRetry();
   }, [client]);
 
+  const isAuthenticated = session !== null;
+
+  // Clear cached token when user logs out
+  useEffect(() => {
+    if (!isAuthenticated) {
+      cachedTokenRef.current = null;
+    }
+  }, [isAuthenticated]);
+
   const fetchAccessToken = useCallback(
     async ({ forceRefreshToken }: { forceRefreshToken: boolean }) => {
-      if (forceRefreshToken) {
+      // Fetch token when:
+      // 1. Forced refresh is requested (expired token)
+      // 2. User is authenticated but we don't have a cached token yet
+      if (forceRefreshToken || (isAuthenticated && !cachedTokenRef.current)) {
         const token = await fetchToken();
-        logVerbose(`returning retrieved token`);
+        cachedTokenRef.current = token;
+        logVerbose(`returning ${forceRefreshToken ? 'refreshed' : 'initial'} token`);
         return token;
       }
-      return null;
+      // Return cached token if authenticated, null otherwise
+      return isAuthenticated ? cachedTokenRef.current : null;
     },
-    [fetchToken]
+    [fetchToken, isAuthenticated, logVerbose]
   );
 
   useEffect(
@@ -159,7 +177,6 @@ export function AuthProvider({
     [client, authClient]
   );
 
-  const isAuthenticated = session !== null;
   const isLoading = isSessionPending;
   const authState = useMemo(
     () => ({
