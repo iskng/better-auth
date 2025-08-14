@@ -65,19 +65,19 @@ export function AuthProvider({
   const { data: session, isPending: isSessionPending } =
     authClient.useSession();
 
-  const verbose: boolean = client.verbose ?? false;
   const logVerbose = useCallback(
     (message: string) => {
-      if (verbose) {
+      if (client?.verbose) {
         console.debug(`${new Date().toISOString()} ${message}`);
-        client.logger?.logVerbose(message);
+        client?.logger?.logVerbose(message);
       }
     },
-    [verbose]
+    [client]
   );
 
-  // Track the cached token
+  // Track the cached token and in-flight requests
   const cachedTokenRef = useRef<string | null>(null);
+  const inflightRef = useRef<Promise<string | null> | null>(null);
 
   const fetchToken = useCallback(async () => {
     const initialBackoff = 100;
@@ -122,60 +122,78 @@ export function AuthProvider({
   useEffect(() => {
     if (!isAuthenticated) {
       cachedTokenRef.current = null;
+      inflightRef.current = null;
     }
   }, [isAuthenticated]);
+
+  // Invalidate cache when authClient changes
+  useEffect(() => {
+    cachedTokenRef.current = null;
+    inflightRef.current = null;
+  }, [authClient]);
 
   const fetchAccessToken = useCallback(
     async ({ forceRefreshToken }: { forceRefreshToken: boolean }) => {
       // Fetch token when:
       // 1. Forced refresh is requested (expired token)
       // 2. User is authenticated but we don't have a cached token yet
-      if (forceRefreshToken || (isAuthenticated && !cachedTokenRef.current)) {
-        const token = await fetchToken();
-        cachedTokenRef.current = token;
+      const needsFetch = forceRefreshToken || (isAuthenticated && !cachedTokenRef.current);
+      
+      if (needsFetch) {
+        // Deduplicate concurrent requests
+        if (!inflightRef.current) {
+          inflightRef.current = fetchToken()
+            .then(token => {
+              cachedTokenRef.current = token;
+              return token;
+            })
+            .finally(() => {
+              inflightRef.current = null;
+            });
+        }
+        
+        const token = await inflightRef.current;
         logVerbose(`returning ${forceRefreshToken ? 'refreshed' : 'initial'} token`);
         return token;
       }
+      
       // Return cached token if authenticated, null otherwise
       return isAuthenticated ? cachedTokenRef.current : null;
     },
     [fetchToken, isAuthenticated, logVerbose]
   );
 
-  useEffect(
-    () => {
-      // eslint-disable-next-line @typescript-eslint/no-floating-promises
-      (async () => {
-        const url = new URL(window.location?.href);
-        const token = url.searchParams.get("ott");
-        if (token) {
-          const authClientWithCrossDomain =
-            authClient as AuthClientWithPlugins<PluginsWithCrossDomain>;
-          url.searchParams.delete("ott");
-          const result =
-            await authClientWithCrossDomain.crossDomain.oneTimeToken.verify({
-              token,
-            });
-          const session = result.data?.session;
-          if (session) {
-            await authClient.getSession({
-              fetchOptions: {
-                headers: {
-                  Authorization: `Bearer ${session.token}`,
-                },
+  useEffect(() => {
+    // SSR safety check
+    if (typeof window === "undefined") return;
+    
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    (async () => {
+      const url = new URL(window.location.href);
+      const token = url.searchParams.get("ott");
+      if (token) {
+        const authClientWithCrossDomain =
+          authClient as AuthClientWithPlugins<PluginsWithCrossDomain>;
+        url.searchParams.delete("ott");
+        const result =
+          await authClientWithCrossDomain.crossDomain.oneTimeToken.verify({
+            token,
+          });
+        const session = result.data?.session;
+        if (session) {
+          await authClient.getSession({
+            fetchOptions: {
+              headers: {
+                Authorization: `Bearer ${session.token}`,
               },
-            });
-            authClientWithCrossDomain.updateSession();
-          }
-          window.history.replaceState({}, "", url);
+            },
+          });
+          authClientWithCrossDomain.updateSession();
         }
-      })();
-    },
-    // Explicitly chosen dependencies.
-    // This effect should mostly only run once
-    // on mount.
-    [client, authClient]
-  );
+        window.history.replaceState({}, "", url);
+      }
+    })();
+  }, [authClient]);
 
   const isLoading = isSessionPending;
   const authState = useMemo(
